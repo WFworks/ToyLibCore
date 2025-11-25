@@ -5,7 +5,7 @@
 #include <string>
 #include <memory>
 
-// アクター管理BBB
+// アクター管理CCC
 class Actor
 {
 public:
