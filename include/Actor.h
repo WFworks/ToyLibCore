@@ -5,7 +5,7 @@
 #include <string>
 #include <memory>
 
-// アクター管理
+// アクター管理AAA
 class Actor
 {
 public:
