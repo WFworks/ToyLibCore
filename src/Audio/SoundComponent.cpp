@@ -1,88 +1,142 @@
+// Audio/SoundComponent.cpp
 #include "Audio/SoundComponent.h"
+
 #include "Engine/Core/Actor.h"
 #include "Engine/Core/Application.h"
 #include "Asset/AssetManager.h"
 #include "Asset/Audio/SoundEffect.h"
 #include "Engine/Render/Renderer.h"
+#include "Utils/MathUtil.h"
+#include <iostream>
+
+namespace toy {
 
 SoundComponent::SoundComponent(Actor* owner, int updateOrder)
-    : Component(owner, updateOrder)
-    , mVolume(1.0f)
-    , mIsLoop(false)
-    , mAutoPlay(false)
-    , mUseDistanceAttenuation(false)
-    , mIsExclusive(false)
-    , mChannel(-1)
-    , mHasPlayed(false)
+: Component(owner, updateOrder)
+, mVolume(1.0f)
+, mIsLoop(false)
+, mAutoPlay(false)
+, mUseDistanceAttenuation(false)
+, mIsExclusive(false)
+, mHasPlayed(false)
+, mSource(0)
 {
 }
 
 SoundComponent::~SoundComponent()
 {
-    Stop(); // 再生中の音を止める
+    // 自前のソースを停止・破棄
+    Stop();
+    if (mSource != 0)
+    {
+        alDeleteSources(1, &mSource);
+        mSource = 0;
+    }
 }
 
+//--------------------------------------
+// 再生するサウンド（SE名）を指定
+//--------------------------------------
 void SoundComponent::SetSound(const std::string& fileName)
 {
     mSoundName = fileName;
 }
 
+//--------------------------------------
+// 再生開始
+//--------------------------------------
 void SoundComponent::Play()
 {
     if (mSoundName.empty()) return;
 
-    if (mIsExclusive && IsPlaying())
-    {
-        return; // 排他再生中は新しく鳴らさない
-    }
+    // 排他再生モードなら、すでに再生中のときは無視
+    if (mIsExclusive && IsPlaying()) return;
 
-    auto sound = mOwnerActor->GetApp()->GetAssetManager()->GetSoundEffect(mSoundName);
+    auto* app    = GetOwner()->GetApp();
+    auto* assets = app->GetAssetManager();
+    auto sound   = assets->GetSoundEffect(mSoundName);
     if (!sound) return;
 
-    float actualVolume = mVolume;
-
-    if (mUseDistanceAttenuation)
+    // ソース生成（初回のみ）
+    if (mSource == 0)
     {
-        Vector3 camPos = mOwnerActor->GetApp()->GetRenderer()->GetViewMatrix().GetTranslation();
-        Vector3 pos = mOwnerActor->GetPosition();
-        float distance = (camPos - pos).Length();
+        alGenSources(1, &mSource);
 
-        if (distance > 5.0f)
-        {
-            actualVolume *= (5.0f / distance);
-            if (actualVolume < 0.0f) actualVolume = 0.0f;
-        }
+        // 距離減衰に関するパラメータ（3D SE 用）
+        // ※ mUseDistanceAttenuation のオン/オフに応じて
+        //    ここを分ける実装も可能
+        alSourcef(mSource, AL_REFERENCE_DISTANCE, 3.0f);  // この距離まではほぼフル音量
+        alSourcef(mSource, AL_MAX_DISTANCE,      50.0f);  // これ以上離れてもあまり変わらない
+        alSourcef(mSource, AL_ROLLOFF_FACTOR,    1.0f);   // 減衰の強さ
     }
 
-    Mix_VolumeChunk(sound->GetChunk(), static_cast<int>(actualVolume * MIX_MAX_VOLUME));
-    mChannel = Mix_PlayChannel(-1, sound->GetChunk(), mIsLoop ? -1 : 0);
+    // バッファ・ボリューム・ループ設定
+    alSourcei(mSource, AL_BUFFER, sound->GetBuffer());
+    alSourcef(mSource, AL_GAIN, mVolume);
+    alSourcei(mSource, AL_LOOPING, mIsLoop ? AL_TRUE : AL_FALSE);
+
+    // 現在の Actor 位置を OpenAL ソースに反映
+    auto pos = GetOwner()->GetPosition();
+    alSource3f(mSource, AL_POSITION, pos.x, pos.y, pos.z);
+
+    // 再生開始
+    alSourcePlay(mSource);
 }
 
+//--------------------------------------
+// 再生停止
+//--------------------------------------
 void SoundComponent::Stop()
 {
-    if (mChannel >= 0)
+    if (mSource != 0)
     {
-        Mix_HaltChannel(mChannel);
-        mChannel = -1;
+        alSourceStop(mSource);
     }
 }
 
+//--------------------------------------
+// 再生中かどうか
+//--------------------------------------
 bool SoundComponent::IsPlaying() const
 {
-    return mChannel >= 0 && Mix_Playing(mChannel) == 1;
+    if (mSource == 0) return false;
+
+    ALint state = 0;
+    alGetSourcei(mSource, AL_SOURCE_STATE, &state);
+    return (state == AL_PLAYING);
 }
 
-void SoundComponent::Update(float deltaTime)
+//--------------------------------------
+// 毎フレーム更新
+//--------------------------------------
+void SoundComponent::Update(float)
 {
+    // 自動再生フラグが立っていて、まだ未再生なら一度だけ再生
     if (mAutoPlay && !mHasPlayed)
     {
         Play();
         mHasPlayed = true;
     }
 
-    // チャンネルが停止してたら -1 にリセット（明示的に管理）
-    if (mChannel >= 0 && !IsPlaying())
+    if (mSource != 0)
     {
-        mChannel = -1;
+        ALint state = 0;
+        alGetSourcei(mSource, AL_SOURCE_STATE, &state);
+
+        // 再生中なら Actor の位置に追従させる
+        if (state == AL_PLAYING)
+        {
+            auto pos = GetOwner()->GetPosition();
+            alSource3f(mSource, AL_POSITION, pos.x, pos.y, pos.z);
+        }
+
+        // ループしない場合、再生終了後にフラグリセットなどを行いたければここで処理
+        if (!mIsLoop && state == AL_STOPPED)
+        {
+            // TODO: 必要ならここでイベント通知やフラグリセットを行う
+            // 例: mHasPlayed = false;
+        }
     }
 }
+
+} // namespace toy

@@ -4,50 +4,56 @@
 #include "Asset/Audio/SoundEffect.h"
 #include "Asset/Audio/Music.h"
 #include "Asset/Font/TextFont.h"
-
 #include <iostream>
 
+namespace toy {
+
 AssetManager::AssetManager()
-: mAssetsPath("GameApp/Assets") // デフォルト値
+    : mAssetsPath("ToyGame/Assets") // デフォルトのアセット基準パス
+    , mWindowDisplayScale(1.0f)
 {
 }
 
 void AssetManager::UnloadData()
 {
-    // テクスチャ削除
+    // すべてのアセットを破棄（シーン切り替えなど）
     mTextures.clear();
-    // メッシュ削除
     mMeshes.clear();
-    // サウンド削除
     mSoundEffects.clear();
-    // BGM削除
     mMusics.clear();
-    // フォント削除
     mTextFonts.clear();
 }
 
-// テクスチャ取り出し
-std::shared_ptr<Texture> AssetManager::GetTexture(const std::string &fileName)
+//======================================================================
+// テクスチャ取得
+//  - キャッシュに同名のテクスチャがあればそれを返す
+//  - なければロードして登録
+//======================================================================
+std::shared_ptr<Texture> AssetManager::GetTexture(const std::string& fileName)
 {
     auto iter = mTextures.find(fileName);
     if (iter != mTextures.end())
     {
-        return iter->second; // すでにあるのでそれを返す
+        return iter->second;      // 既存テクスチャを返す
     }
-    else
+
+    auto tex = std::make_shared<Texture>();
+    if (tex->Load(fileName, this))
     {
-        auto tex = std::make_shared<Texture>();
-        if (tex->Load(fileName, this))
-        {
-            mTextures[fileName] = tex;
-            return tex;
-        }
+        mTextures[fileName] = tex;
+        return tex;
     }
-    return nullptr; // 失敗したら null
+
+    return nullptr;               // ロード失敗
 }
 
-// 埋め込みテクスチャ
-std::shared_ptr<Texture> AssetManager::GetEmbeddedTexture(const std::string& nameKey, const uint8_t* data, size_t dataSize)
+//======================================================================
+// 埋め込みテクスチャ（FBX/GLTFの aiTexture 用）
+//======================================================================
+std::shared_ptr<Texture> AssetManager::GetEmbeddedTexture(
+    const std::string& nameKey,
+    const uint8_t* data,
+    size_t dataSize)
 {
     auto iter = mTextures.find(nameKey);
     if (iter != mTextures.end())
@@ -65,8 +71,11 @@ std::shared_ptr<Texture> AssetManager::GetEmbeddedTexture(const std::string& nam
     return nullptr;
 }
 
-// メッシュ取り出し
-std::shared_ptr<Mesh> AssetManager::GetMesh(const std::string& fileName, bool isRightHanded)
+//======================================================================
+// メッシュ取得
+//======================================================================
+std::shared_ptr<Mesh> AssetManager::GetMesh(const std::string& fileName,
+                                            bool isRightHanded)
 {
     auto iter = mMeshes.find(fileName);
     if (iter != mMeshes.end())
@@ -75,7 +84,6 @@ std::shared_ptr<Mesh> AssetManager::GetMesh(const std::string& fileName, bool is
     }
 
     auto mesh = std::make_shared<Mesh>();
- 
     if (mesh->Load(fileName, this, isRightHanded))
     {
         mMeshes[fileName] = mesh;
@@ -85,7 +93,9 @@ std::shared_ptr<Mesh> AssetManager::GetMesh(const std::string& fileName, bool is
     return nullptr;
 }
 
-// 効果音を取得
+//======================================================================
+// 効果音（SoundEffect）取得
+//======================================================================
 std::shared_ptr<SoundEffect> AssetManager::GetSoundEffect(const std::string& fileName)
 {
     auto iter = mSoundEffects.find(fileName);
@@ -100,10 +110,13 @@ std::shared_ptr<SoundEffect> AssetManager::GetSoundEffect(const std::string& fil
         mSoundEffects[fileName] = se;
         return se;
     }
+
     return nullptr;
 }
 
-// BGMを取得
+//======================================================================
+// BGM（Music）取得
+//======================================================================
 std::shared_ptr<Music> AssetManager::GetMusic(const std::string& fileName)
 {
     auto iter = mMusics.find(fileName);
@@ -118,31 +131,35 @@ std::shared_ptr<Music> AssetManager::GetMusic(const std::string& fileName)
         mMusics[fileName] = music;
         return music;
     }
+
     return nullptr;
 }
 
-// フォント
-std::shared_ptr<TextFont> AssetManager::GetFont(const std::string& fileName, int pointSize)
+//======================================================================
+// フォント取得
+//  - サイズ違いも区別してキャッシュするため key にサイズを含む
+//  - DPI スケールを反映
+//======================================================================
+std::shared_ptr<TextFont> AssetManager::GetFont(const std::string& fileName,
+                                                int pointSize)
 {
-    // フォントはサイズ違いもあるので key にサイズ情報を含める
+    // サイズも含めたキー
     const std::string key = fileName + "#" + std::to_string(pointSize);
 
-    // 既にロード済みならそれを返す
+    // キャッシュ済みなら返す
     auto iter = mTextFonts.find(key);
     if (iter != mTextFonts.end())
     {
         return iter->second;
     }
 
-    // 新規ロード
+    // 新規ロード（font->Load はフルパスを想定）
     auto font = std::make_shared<TextFont>();
 
-    // Texture::Load と同じく AssetsPath を前につける
-    // GetTexture の実装と同じ感覚で：
-    //   fullPath = mAssetsPath + fileName;
-    // としておく（fileName 側で "/Fonts/xxx.ttf" などを渡す想定）
     const std::string fullPath = mAssetsPath + fileName;
-    if (!font->Load(fullPath, pointSize))
+
+    // DPI スケールを反映してロード
+    if (!font->Load(fullPath, pointSize * mWindowDisplayScale))
     {
         std::cerr << "[AssetManager] Failed to load font: "
                   << fullPath << " (size: " << pointSize << ")"
@@ -150,6 +167,9 @@ std::shared_ptr<TextFont> AssetManager::GetFont(const std::string& fileName, int
         return nullptr;
     }
 
+    // 登録して返す
     mTextFonts.emplace(key, font);
     return font;
 }
+
+} // namespace toy

@@ -5,6 +5,8 @@
 #include "Engine/Render/Renderer.h"
 #include "Asset/Material/Texture.h"
 
+namespace toy {
+
 TextSpriteComponent::TextSpriteComponent(Actor* owner, int drawOrder, VisualLayer layer)
 : SpriteComponent(owner, drawOrder, layer)
 , mText("")
@@ -15,7 +17,7 @@ TextSpriteComponent::TextSpriteComponent(Actor* owner, int drawOrder, VisualLaye
 
 TextSpriteComponent::~TextSpriteComponent()
 {
-    // mTexture は SpriteComponent / VisualComponent 側で shared_ptr 管理なので特に何もしなくてOK
+
 }
 
 void TextSpriteComponent::SetText(const std::string& text)
@@ -54,7 +56,7 @@ void TextSpriteComponent::UpdateTexture()
         return;
     }
 
-    auto* app = mOwnerActor->GetApp();
+    auto* app = GetOwner()->GetApp();
     auto* renderer = app->GetRenderer();
 
     auto tex = renderer->CreateTextTexture(mText, mColor, mFont);
@@ -70,3 +72,4 @@ void TextSpriteComponent::UpdateTexture()
     // ここでは特にやることなし（スケーリングしたいときは SetScale() を別途呼ぶ）
 }
 
+} // namespace toy

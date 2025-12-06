@@ -6,7 +6,13 @@
 #include <iostream>
 #include <memory>
 
-//コンストラクタ
+namespace toy {
+
+//=============================================================
+// コンストラクタ／デストラクタ
+//=============================================================
+
+// コンストラクタ
 Actor::Actor(Application* a)
 : mStatus(EActive)
 , mPosition(Vector3::Zero)
@@ -15,33 +21,123 @@ Actor::Actor(Application* a)
 , mApp(a)
 , mIsRecomputeWorldTransform(true)
 , mActorID("Unnamed Actor")
+, mParent(nullptr)
 {
-
 }
 
-// デストラクタ
 Actor::~Actor()
 {
-   
-
+    // 親の子リストから自分を外す
+    if (mParent)
+    {
+        auto& siblings = mParent->mChildren;
+        siblings.erase(
+            std::remove(siblings.begin(), siblings.end(), this),
+            siblings.end()
+        );
+    }
+    
+    // 子の親参照をクリア（ここでは「孤児」にする方針）
+    for (auto* child : mChildren)
+    {
+        if (child)
+        {
+            child->mParent = nullptr;
+            child->MarkWorldDirty();
+        }
+    }
 }
 
-// メインルーチン
+//=============================================================
+// Transform 更新（親子連鎖）
+//=============================================================
+
+// ワールド行列の再計算フラグを立て、子にも伝播
+void Actor::MarkWorldDirty()
+{
+    if (!mIsRecomputeWorldTransform)
+    {
+        mIsRecomputeWorldTransform = true;
+        
+        // 子へも伝播
+        for (auto* child : mChildren)
+        {
+            if (child)
+            {
+                child->MarkWorldDirty();
+            }
+        }
+    }
+}
+
+// ワールドマトリックスの計算
+void Actor::ComputeWorldTransform()
+{
+    if (!mIsRecomputeWorldTransform)
+        return;
+    
+    // 親がいるなら、まず親の WorldTransform を確定させる
+    if (mParent)
+    {
+        mParent->ComputeWorldTransform();
+    }
+    
+    // ローカル行列（SRT）
+    Matrix4 local = Matrix4::CreateScale(mScale);
+    local *= Matrix4::CreateFromQuaternion(mRotation);
+    local *= Matrix4::CreateTranslation(mPosition);
+    
+    if (mParent)
+    {
+        // 親ワールドのコピーを作る
+        Matrix4 parentNoScale = mParent->mWorldTransform;
+        
+        // 親の軸は GetXAxis/Y/Z が「正規化済みの向き」を返すので、
+        // それらを書き戻すことでスケール成分を 1 にリセット
+        parentNoScale.SetXAxis(mParent->mWorldTransform.GetXAxis());
+        parentNoScale.SetYAxis(mParent->mWorldTransform.GetYAxis());
+        parentNoScale.SetZAxis(mParent->mWorldTransform.GetZAxis());
+        // 平行移動はそのまま使う
+        
+        // 親の「スケールなし」行列と自分のローカル行列からワールド行列を作成
+        mWorldTransform = local * parentNoScale;
+    }
+    else
+    {
+        mWorldTransform = local;
+    }
+    
+    mIsRecomputeWorldTransform = false;
+    
+    // 各 Component にもワールド更新イベントを通知
+    for (auto& comp : mComponents)
+    {
+        comp->OnUpdateWorldTransform();
+    }
+}
+
+//=============================================================
+// Update 系
+//=============================================================
+
+// メインルーチン（毎フレームの更新）
 void Actor::Update(float deltaTime)
 {
-    // EActiveの場合にComponentもUpdate
+    // EActive のときのみ更新
     if (mStatus == EActive)
     {
-        // 派生先の処理を呼ぶ
+        // 派生クラス側の処理
         UpdateActor(deltaTime);
-        // コンポーネントを更新
+        
+        // コンポーネントの更新
         UpdateComponents(deltaTime);
+        
         // 座標系更新
         ComputeWorldTransform();
     }
 }
 
-// コンポーネントのUpdateを呼ぶ
+// 全コンポーネントの Update を呼ぶ
 void Actor::UpdateComponents(float deltaTime)
 {
     for (auto& comp : mComponents)
@@ -50,8 +146,11 @@ void Actor::UpdateComponents(float deltaTime)
     }
 }
 
+//=============================================================
+// 入力処理
+//=============================================================
 
-// 入力を受け取る
+// 入力を受け取り、コンポーネント → Actor の順に処理
 void Actor::ProcessInput(const struct InputState& state)
 {
     if (mStatus == EActive)
@@ -61,37 +160,22 @@ void Actor::ProcessInput(const struct InputState& state)
         {
             comp->ProcessInput(state);
         }
-        // 派生先の入力処理に渡す
+        // 派生クラス側の入力処理
         ActorInput(state);
     }
 }
 
-// 入力処理　(実装は派生先)
+// Actor 固有の入力処理（デフォルトは何もしない）
 void Actor::ActorInput(const struct InputState& state)
 {
+    (void)state;
 }
 
-// ワールドマトリックス
-void Actor::ComputeWorldTransform()
-{
-    if (mIsRecomputeWorldTransform)
-    {
-        mIsRecomputeWorldTransform = false;
-        // Scale → rotate → translate
-        mWorldTransform = Matrix4::CreateScale(mScale);
-        mWorldTransform *= Matrix4::CreateFromQuaternion(mRotation);
-        mWorldTransform *= Matrix4::CreateTranslation(mPosition);
+//=============================================================
+// コンポーネント管理
+//=============================================================
 
-
-        // 各Componentも計算する
-        for (auto& comp : mComponents)
-        {
-            comp->OnUpdateWorldTransform();
-        }
-    }
-}
-
-// コンポーネントを追加
+// コンポーネントを追加（UpdateOrder 順に挿入）
 void Actor::AddComponent(std::unique_ptr<Component> component)
 {
     int order = component->GetUpdateOrder();
@@ -105,32 +189,84 @@ void Actor::AddComponent(std::unique_ptr<Component> component)
     }
     mComponents.insert(iter, std::move(component));
 }
+
+// コンポーネントを削除
 void Actor::RemoveComponent(Component* component)
 {
-    auto iter = std::find_if(mComponents.begin(), mComponents.end(),
-        [component](const std::unique_ptr<Component>& c) { return c.get() == component; });
-
+    auto iter = std::find_if(
+        mComponents.begin(),
+        mComponents.end(),
+        [component](const std::unique_ptr<Component>& c)
+        {
+            return c.get() == component;
+        }
+    );
+    
     if (iter != mComponents.end())
     {
         mComponents.erase(iter);
     }
 }
 
+//=============================================================
+// 向き／位置／親子関係
+//=============================================================
+
+// 前方ベクトルを指定して回転を設定
 void Actor::SetForward(const Vector3& dir)
 {
     // Y成分を無視（XZ平面に投影）
     Vector3 flatDir = Vector3(dir.x, 0.0f, dir.z);
-
+    
     if (flatDir.LengthSq() == 0.0f)
         return; // 方向なし
-
+    
     flatDir = Vector3::Normalize(flatDir);
-
-    // atan2(x, z) で Yaw を取得（Zが前提、Xが右）
+    
+    // atan2(x, z) で Yaw を取得（Zが前、Xが右 の前提）
     float yaw = std::atan2(flatDir.x, flatDir.z);
-
-    // YawからQuaternion生成（Pitch = 0, Roll = 0）
-    Quaternion rot = Quaternion::FromEulerDegrees(Vector3(0.0f, yaw, 0.f));
-
+    
+    // Yaw から Quaternion を生成（Pitch = 0, Roll = 0）
+    Quaternion rot = Quaternion::FromEulerDegrees(Vector3(0.0f, yaw, 0.0f));
+    
     SetRotation(rot);
 }
+
+// 位置設定
+void Actor::SetPosition(const Vector3& pos)
+{
+    // 親がいる場合は「親からのオフセット（ローカル）」、
+    // 親がいない場合は「ワールド座標」として扱う
+    mPosition = pos;
+    MarkWorldDirty();
+}
+
+// 親の設定（子リストの付け替えのみ／ワールド維持はしない）
+void Actor::SetParent(Actor* newParent)
+{
+    if (mParent == newParent)
+        return;
+    
+    // 古い親から外す
+    if (mParent)
+    {
+        auto& siblings = mParent->mChildren;
+        siblings.erase(
+            std::remove(siblings.begin(), siblings.end(), this),
+            siblings.end()
+        );
+    }
+    
+    mParent = newParent;
+    
+    // 新しい親に自分を登録
+    if (mParent)
+    {
+        mParent->mChildren.push_back(this);
+    }
+    
+    // ローカル値として扱うだけ（ワールド位置維持などはここでは行わない）
+    MarkWorldDirty();
+}
+
+} // namespace toy

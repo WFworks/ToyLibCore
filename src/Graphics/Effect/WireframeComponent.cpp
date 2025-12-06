@@ -6,32 +6,64 @@
 #include "Engine/Render/LightingManager.h"
 #include "Asset/Geometry/VertexArray.h"
 
+namespace toy {
 
+//------------------------------------------------------------
+// コンストラクタ
+//   ・ワイヤーフレーム描画用シェーダ（Solid）を取得
+//   ・線色は白で初期化
+//------------------------------------------------------------
 WireframeComponent::WireframeComponent(Actor* owner, int drawOrder, VisualLayer layer)
 : VisualComponent(owner, drawOrder, layer)
 , mColor(Vector3(1.f, 1.f, 1.f))
 {
-    mShader = mOwnerActor->GetApp()->GetRenderer()->GetShader("Solid");
+    // 単色描画シェーダ（Solid）を使用
+    mShader = GetOwner()->GetApp()->GetRenderer()->GetShader("Solid");
 }
 
-
+//------------------------------------------------------------
+// Draw()
+//   ・登録された VertexArray を線描画（ワイヤーフレーム）する
+//   ・LightingManager から最低限のライト設定を反映
+//   ・GL_LINE_STRIP による線の描画
+//------------------------------------------------------------
 void WireframeComponent::Draw()
 {
     if (!mIsVisible) return;
     
-    auto renderer = mOwnerActor->GetApp()->GetRenderer();
+    auto renderer = GetOwner()->GetApp()->GetRenderer();
     Matrix4 view = renderer->GetViewMatrix();
     Matrix4 proj = renderer->GetProjectionMatrix();
     
+    // シェーダーアクティブ
     mShader->SetActive();
+    
+    // ライティングの基本ユニフォームをセット（Solid シェーダー側で使用）
     mLightingManager->ApplyToShader(mShader, view);
+    
+    // VP 行列
     mShader->SetMatrixUniform("uViewProj", view * proj);
+    
+    // 線色
     mShader->SetVectorUniform("uSolColor", mColor);
     
+    // ワールド変換
+    mShader->SetMatrixUniform("uWorldTransform", GetOwner()->GetWorldTransform());
     
-    // WorldマトリックスをShaderに送る
-    mShader->SetMatrixUniform("uWorldTransform", mOwnerActor->GetWorldTransform());
-    mVertexArray->SetActive();
-    glDrawElements(GL_LINE_STRIP,  mVertexArray->GetNumVerts() * 3, GL_UNSIGNED_INT, nullptr);
-
+    // メッシュ描画
+    if (mVertexArray)
+    {
+        mVertexArray->SetActive();
+        
+        // NOTE:
+        //   GL_LINE_STRIP により頂点が順に線で結ばれる
+        //   ※ここではインデックス数ではなく「頂点数×3」を指定しているため
+        //     VertexArray の仕様に依存した描画となる点に注意。
+        glDrawElements(GL_LINE_STRIP,
+                       mVertexArray->GetNumVerts() * 3,
+                       GL_UNSIGNED_INT,
+                       nullptr);
+    }
 }
+
+} // namespace toy

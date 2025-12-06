@@ -13,9 +13,21 @@
 #include "Environment/SkyDomeComponent.h"
 #include "Graphics/Effect/WireframeComponent.h"
 #include "Asset/Font/TextFont.h"
+#include "Utils/FrustumUtil.h"
+#include "Physics/BoundingVolumeComponent.h"
+#include "Engine/Core/Actor.h"
+#include "Asset/Geometry/Polygon.h"
+
 #include <GL/glew.h>
 #include <algorithm>
 #include <string>
+#include <iostream>
+
+namespace toy {
+
+//=============================================================
+// コンストラクタ／デストラクタ
+//=============================================================
 
 // コンストラクタ
 Renderer::Renderer()
@@ -34,70 +46,189 @@ Renderer::Renderer()
 , mShadowFBOHeight(4096)
 , mWindow(nullptr)
 , mGLContext(nullptr)
-, mShaderPath("ToyLibCore/Shaders/")
+, mShaderPath("ToyLib/Shaders/")
+, mCntDrawObject(0)
+, mSkyDomeComp(nullptr)
+, mLightSpaceMatrix(Matrix4::Identity)
+, mWindowDisplayScale(1.0f)
 {
+    // ライティング管理クラス
     mLightingManager = std::make_shared<LightingManager>();
-    LoadSettings("ToyLibCore/Settings/Renderer_Settings.json");
+
+    // Renderer の初期設定（タイトルや解像度など）を外部ファイルから読み込む
+    // 例: ToyLib/Settings/Renderer_Settings.json
+    LoadSettings("ToyLib/Settings/Renderer_Settings.json");
 }
 
 // デストラクタ
 Renderer::~Renderer()
 {
+    // 実処理は Shutdown() 側で行う前提
 }
 
-// ウィンドウ生成とGL初期化
+
+//=============================================================
+// 初期化／終了処理
+//=============================================================
+
 bool Renderer::Initialize()
 {
-    // OpenGL プロファイル, バージョン
+    //---------------------------------------------------------
+    // OpenGL コンテキスト属性設定
+    //---------------------------------------------------------
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
 
-    // ダブルバッファリング
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    // RGBAチャンネル
-    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE,   8);
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,  8);
     SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
-    // ハードウェアアクセラレーション有効化
+
     SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);
-    
+
     unsigned int WINDOW_FLAGS = SDL_WINDOW_OPENGL;
     if (mIsFullScreen)
     {
-        WINDOW_FLAGS =  WINDOW_FLAGS | SDL_WINDOW_FULLSCREEN;
+        WINDOW_FLAGS |= SDL_WINDOW_FULLSCREEN;
     }
 
-    //ウインドウ生成
-    mWindow = SDL_CreateWindow(mStrTitle.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(mScreenWidth), static_cast<int>(mScreenHeight), WINDOW_FLAGS);
-    
-    if (!mWindow )
+    //---------------------------------------------------------
+    // 設定ファイルで指定した「論理サイズ」
+    //   例: 1280x720
+    //---------------------------------------------------------
+    const int logicalW = static_cast<int>(mScreenWidth);
+    const int logicalH = static_cast<int>(mScreenHeight);
+
+    //---------------------------------------------------------
+    // ディスプレイの DPI スケール取得
+    //   Windows: 150% => 1.5
+    //   macOS : Retina => 2.0
+    //---------------------------------------------------------
+    float contentScale = 1.0f;
+
+    SDL_DisplayID primary = SDL_GetPrimaryDisplay();
+    if (primary != 0)
     {
-        std::cout << "Unable to create window" << std::endl;
+        float s = SDL_GetDisplayContentScale(primary);
+        if (s > 0.0f)
+        {
+            contentScale = s;
+        }
+    }
+
+    //---------------------------------------------------------
+    // DPI を掛けた「実際のウィンドウサイズ」
+    //---------------------------------------------------------
+    int windowW = static_cast<int>(logicalW * contentScale);
+    int windowH = static_cast<int>(logicalH * contentScale);
+
+    //---------------------------------------------------------
+    // ウィンドウ生成（DPI 対応）
+    //---------------------------------------------------------
+    mWindow = SDL_CreateWindow(
+        mStrTitle.c_str(),
+        windowW,
+        windowH,
+        WINDOW_FLAGS
+    );
+
+    if (!mWindow)
+    {
+        std::cerr << "Unable to create window: " << SDL_GetError() << std::endl;
         return false;
     }
+
+    SDL_SetWindowPosition(mWindow, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+
+    //---------------------------------------------------------
     // OpenGL コンテキスト生成
+    //---------------------------------------------------------
     mGLContext = SDL_GL_CreateContext(mWindow);
-    
-    // GLEW初期化
+    if (!mGLContext)
+    {
+        std::cerr << "Failed to create GL context: " << SDL_GetError() << std::endl;
+        return false;
+    }
+
+    //---------------------------------------------------------
+    // 垂直同期（VSync）
+    //---------------------------------------------------------
+    SDL_GL_SetSwapInterval(1);
+
+    //---------------------------------------------------------
+    // CreateWindow 後に「実ピクセル数」を取得（HiDPI 対応）
+    //---------------------------------------------------------
+    int pixelW = 0;
+    int pixelH = 0;
+    SDL_GetWindowSizeInPixels(mWindow, &pixelW, &pixelH);
+
+    // 描画に使うスクリーンサイズは「実ピクセル」で管理
+    mScreenWidth  = static_cast<float>(pixelW);
+    mScreenHeight = static_cast<float>(pixelH);
+
+    //---------------------------------------------------------
+    // このウィンドウに対する DPI スケール（ウィンドウ基準）
+    //---------------------------------------------------------
+    mWindowDisplayScale = SDL_GetWindowDisplayScale(mWindow);
+    if (mWindowDisplayScale <= 0.0f)
+    {
+        mWindowDisplayScale = 1.0f;
+    }
+
+    //---------------------------------------------------------
+    // OpenGL のビューポート設定（実ピクセルベース）
+    //---------------------------------------------------------
+    glViewport(0, 0, pixelW, pixelH);
+
+    //---------------------------------------------------------
+    // GLEW 初期化
+    //---------------------------------------------------------
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK)
     {
-        std::cout << "Failed to initialize GLEW" << std::endl;
+        std::cerr << "Failed to initialize GLEW" << std::endl;
         return false;
     }
-   
-    // シェーダー のロードなどはここでやる
-    LoadShaders();
-    // スプライト用頂点バッファ
+
+    //---------------------------------------------------------
+    // シェーダーのロード
+    //---------------------------------------------------------
+    if (!LoadShaders())
+    {
+        return false;
+    }
+
+    //---------------------------------------------------------
+    // 各種描画用 VAO 準備
+    //---------------------------------------------------------
     CreateSpriteVerts();
-    // オーバーレイエフェクト用頂点バッファ
     CreateFullScreenQuad();
+
+    //---------------------------------------------------------
     // シャドウマッピング初期化
-    InitializeShadowMapping();
-    // クリアカラーのデフォルト値
+    //---------------------------------------------------------
+    if (!InitializeShadowMapping())
+    {
+        return false;
+    }
+
+    //---------------------------------------------------------
+    // クリアカラーの初期設定
+    //---------------------------------------------------------
     SetClearColor(mClearColor);
+
+    mSkyDomeComp   = nullptr;
+    mCntDrawObject = 0;
+
+    std::cout << "[Renderer] DPI-aware Init Complete. "
+        << "Logical(" << logicalW << "x" << logicalH << ") "
+        << "Window("  << windowW  << "x" << windowH  << ") "
+        << "Pixels("  << pixelW   << "x" << pixelH   << ") "
+        << "Scale="   << mWindowDisplayScale
+        << std::endl;
 
     return true;
 }
@@ -105,45 +236,74 @@ bool Renderer::Initialize()
 // リリース処理
 void Renderer::Shutdown()
 {
-    SDL_GL_DeleteContext(mGLContext);
-    SDL_DestroyWindow(mWindow);
+    if (mGLContext)
+    {
+        SDL_GL_DestroyContext(mGLContext);
+        mGLContext = nullptr;
+    }
 
+    if (mWindow)
+    {
+        SDL_DestroyWindow(mWindow);
+        mWindow = nullptr;
+    }
 }
 
-// 描画処理
+
+//=============================================================
+// メイン描画パス
+//=============================================================
+
 void Renderer::Draw()
 {
+    // カラーバッファ／デプスバッファ初期化
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    // シャドウマップレンダリング
+    
+    // 1) ライト視点でのシャドウマップ描画
     RenderShadowMap();
-
+    
+    // 2) 通常描画パス
     glEnable(GL_CULL_FACE);
     glFrontFace(GL_CCW);
-
+    
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
+    
+    // スカイドーム（背景）
     DrawSky();
+
+    // レイヤー別描画（奥から順に）
     DrawVisualLayer(VisualLayer::Background2D);
     DrawVisualLayer(VisualLayer::Object3D);
     DrawVisualLayer(VisualLayer::Effect3D);
     DrawVisualLayer(VisualLayer::OverlayScreen);
-    
     DrawVisualLayer(VisualLayer::UI);
-
+    
+    // Debug 用カウンタリセット
+    // std::cout << "Render 3D Objects Count = " << mCntDrawObject << std::endl;
+    mCntDrawObject = 0;
+    
+    // バッファ入れ替え
     SDL_GL_SwapWindow(mWindow);
 }
 
+// スカイドーム描画
 void Renderer::DrawSky()
 {
-    if (!mSkyDomeComp) return;
-    mSkyDomeComp->Draw();
+    if (!mSkyDomeComp)
+        return;
 
+    mSkyDomeComp->Draw();
 }
+
+
+//=============================================================
+// VisualComponent 管理
+//=============================================================
 
 void Renderer::AddVisualComp(VisualComponent* comp)
 {
+    // DrawOrder 昇順で挿入
     auto iter = mVisualComps.begin();
     for (; iter != mVisualComps.end(); ++iter)
     {
@@ -160,143 +320,116 @@ void Renderer::RemoveVisualComp(VisualComponent* comp)
         mVisualComps.erase(iter);
 }
 
+
+//=============================================================
+// レイヤー描画＆フラスタムカリング
+//=============================================================
+
 void Renderer::DrawVisualLayer(VisualLayer layer)
 {
+    bool is3DLayer =
+        (layer == VisualLayer::Object3D ||
+         layer == VisualLayer::Effect3D);
+    
+    Frustum frustum;
+    if (is3DLayer)
+    {
+        // View * Projection からフラスタムを生成
+        Matrix4 vp = mViewMatrix * mProjectionMatrix;
+        frustum = BuildFrustumFromMatrix(vp);
+    }
+    
+    //---------------------------------------------------------
+    // レイヤーごとのデプス設定
+    //---------------------------------------------------------
     if (layer == VisualLayer::UI || layer == VisualLayer::Background2D)
     {
-        glDisable(GL_DEPTH_TEST);     // Zテスト不要
-        glDepthMask(GL_FALSE);        // 書き込みも不要（2D要素）
+        // 2D/UI → Zテスト不要、書き込み不要
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
     }
     else if (layer == VisualLayer::Effect3D)
     {
-        glEnable(GL_DEPTH_TEST);     // 粒同士のZ隠し合いを防ぐ
-        glDepthMask(GL_FALSE);        // Zバッファ汚さない
+        // 3Dエフェクト → Zテストあり／書き込みなし（パーティクルなど）
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
     }
     else
     {
-        glEnable(GL_DEPTH_TEST);      // 通常描画
-        glDepthMask(GL_TRUE);         // 書き込みON
+        // 通常3D描画
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
     }
     
-    
-    for (auto comp : mVisualComps)
+    //---------------------------------------------------------
+    // コンポーネント描画ループ
+    //---------------------------------------------------------
+    for (auto& comp : mVisualComps)
     {
-        if (comp->IsVisible() && comp->GetLayer() == layer)
+        if (!comp->IsVisible() || comp->GetLayer() != layer)
+            continue;
+        
+        // 3Dレイヤーのみフラスタムカリング
+        if (is3DLayer)
         {
-            comp->Draw();
-        }
-    }
+            // Actor の BoundingVolumeComponent から AABB を取得
+            Actor* owner = comp->GetOwner();
+            if (owner)
+            {
+                auto bv = owner->GetComponent<BoundingVolumeComponent>();
+                if (bv)
+                {
+                    Cube aabb = bv->GetWorldAABB();
 
-    glEnable(GL_DEPTH_TEST); // 念のため戻す
+                    // 視錐台外ならスキップ
+                    if (!FrustumIntersectsAABB(frustum, aabb))
+                    {
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        comp->Draw();
+        mCntDrawObject++;
+    }
+    
+    // 状態戻し（保険）
+    glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
 }
 
 
-//スプライト用ポリゴン
+//=============================================================
+// 共通ジオメトリ（スプライト／フルスクリーン）
+//=============================================================
+
+// スプライト用四角ポリゴン（ローカル [-0.5, 0.5] の正方形）
 void Renderer::CreateSpriteVerts()
 {
     const float vertices[] =
     {
-        -0.5f, 0.5f, 0.f, 0.f, 0.f, 0.0f, 0.f, 0.f, // top left
-        0.5f, 0.5f, 0.f, 0.f, 0.f, 0.0f, 1.f, 0.f, // top right
-        0.5f,-0.5f, 0.f, 0.f, 0.f, 0.0f, 1.f, 1.f, // bottom right
-        -0.5f,-0.5f, 0.f, 0.f, 0.f, 0.0f, 0.f, 1.f  // bottom left
+        -0.5f,  0.5f, 0.f, 0.f, 0.f, 0.0f, 0.f, 0.f, // top left
+         0.5f,  0.5f, 0.f, 0.f, 0.f, 0.0f, 1.f, 0.f, // top right
+         0.5f, -0.5f, 0.f, 0.f, 0.f, 0.0f, 1.f, 1.f, // bottom right
+        -0.5f, -0.5f, 0.f, 0.f, 0.f, 0.0f, 0.f, 1.f  // bottom left
     };
     
-
     const unsigned int indices[] =
     {
         2, 1, 0,
         0, 3, 2
     };
-    mSpriteVerts = std::make_shared<VertexArray>((float*)vertices, (unsigned int)4, (unsigned int*)indices, (unsigned int)6);
+
+    mSpriteVerts = std::make_shared<VertexArray>(
+        (float*)vertices, 4,
+        (unsigned int*)indices, 6
+    );
 }
 
-
-// データ解放
-void Renderer::UnloadData()
-{
-
-    mVisualComps.clear();
-}
-
-// シャドウマッピング
-bool Renderer::InitializeShadowMapping()
-{
-
-    // シャドウマップ用のFBO作成
-    glGenFramebuffers(1, &mShadowFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, mShadowFBO);
-
-    // シャドウ用テクスチャ生成
-    mShadowMapTexture = std::make_shared<Texture>();
-    mShadowMapTexture->CreateShadowMap(mShadowFBOWidth, mShadowFBOHeight);
-
-    // FBOにアタッチ
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, mShadowMapTexture->GetTextureID(), 0);
-
-    // カラーバッファなし（深度のみ）
-    glDrawBuffer(GL_NONE);
-    glReadBuffer(GL_NONE);
-
-    // 完成チェック
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-    {
-        std::cerr << "Error: Shadow framebuffer is not complete!" << std::endl;
-        return false;
-    }
-
-    // FBOのバインド解除
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    return true;
-}
-
-// シャドウマップのレンダリング
-void Renderer::RenderShadowMap()
-{
-
-    // ★ 追加：太陽がほぼゼロならシャドウパスをスキップ
-    float sunIntensity = mLightingManager->GetSunIntensity();
-    if (sunIntensity <= 0.01f)
-    {
-        return;
-    }
-    
-    // FBOバインドして深度バッファだけ描画
-    glBindFramebuffer(GL_FRAMEBUFFER, mShadowFBO);
-    glViewport(0, 0, static_cast<GLsizei>(mShadowFBOWidth), static_cast<GLsizei>(mShadowFBOHeight));
-    
-    glEnable(GL_DEPTH_TEST);
-    glClear(GL_DEPTH_BUFFER_BIT);
-
-    // ビュー・プロジェクション行列
-    // カメラ追従
-    Vector3 camCenter = mInvView.GetTranslation() + mInvView.GetZAxis() * 30.0f;
-    //Vector3 lightDir = Vector3::Normalize(mDirLight.Direction);
-    Vector3 lightDir = mLightingManager->GetLightDirection();
-    Vector3 lightPos = camCenter - lightDir * 50.0f;
-    
-    Matrix4 lightViewMatrix = Matrix4::CreateLookAt(lightPos, camCenter, Vector3::UnitY);
-    Matrix4 lightProjMatrix = Matrix4::CreateOrtho(mShadowOrthoWidth, mShadowOrthoHeight, mShadowNear, mShadowFar);
-    mLightSpaceMatrix =  lightViewMatrix * lightProjMatrix;
-
-    for (auto& visual : mVisualComps)
-    {
-        if (visual->GetEnableShadow() && visual->IsVisible())
-        {
-            visual->DrawShadow();
-        }
-    }
-
-    // ビューポートを戻す（スクリーンサイズ）
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, static_cast<GLsizei>(mScreenWidth), static_cast<GLsizei>(mScreenHeight));
-}
-
-// 雨エフェクトの初期化
+// フルスクリーンクアッド（PostEffect, 天候オーバーレイなど）
 void Renderer::CreateFullScreenQuad()
 {
-    // クアッド作成
     float quadVerts[] = {
         -1.0f, -1.0f,
          1.0f, -1.0f,
@@ -307,19 +440,167 @@ void Renderer::CreateFullScreenQuad()
         0, 1, 2,
         2, 3, 0
     };
-    mFullScreenQuad = std::make_shared<VertexArray>(quadVerts, 4, quadIndices, 6, true);
 
+    // 2D 頂点のみの簡易 VAO（isScreenQuad = true の想定）
+    mFullScreenQuad = std::make_shared<VertexArray>(
+        quadVerts, 4, quadIndices, 6, true
+    );
 }
+
+
+//=============================================================
+// データ解放
+//=============================================================
+
+void Renderer::UnloadData()
+{
+    // VisualComponent の登録だけをクリア
+    // 実際の Mesh/Texture などのリソースは AssetManager 側で管理する想定
+    mVisualComps.clear();
+}
+
+
+//=============================================================
+// シャドウマッピング
+//=============================================================
+
+// シャドウマップ用 FBO 初期化
+bool Renderer::InitializeShadowMapping()
+{
+    // シャドウマップ用 FBO 作成
+    glGenFramebuffers(1, &mShadowFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, mShadowFBO);
+    
+    // シャドウ用テクスチャ生成（深度テクスチャ）
+    mShadowMapTexture = std::make_shared<Texture>();
+    mShadowMapTexture->CreateShadowMap(mShadowFBOWidth, mShadowFBOHeight);
+    
+    // FBO に深度テクスチャをアタッチ
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER,
+        GL_DEPTH_ATTACHMENT,
+        GL_TEXTURE_2D,
+        mShadowMapTexture->GetTextureID(),
+        0
+    );
+    
+    // カラーバッファ無し（深度のみ）
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    
+    // 完成チェック
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    {
+        std::cerr << "Error: Shadow framebuffer is not complete!" << std::endl;
+        return false;
+    }
+    
+    // FBOのバインド解除
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return true;
+}
+
+// シャドウマップのレンダリング
+void Renderer::RenderShadowMap()
+{
+    // 太陽がほぼ消えている時はシャドウをスキップ
+    float sunIntensity = mLightingManager->GetSunIntensity();
+    if (sunIntensity <= 0.01f)
+        return;
+    
+    //---------------------------------------------------------
+    // シャドウ FBO バインド
+    //---------------------------------------------------------
+    glBindFramebuffer(GL_FRAMEBUFFER, mShadowFBO);
+    glViewport(0, 0,
+               (GLsizei)mShadowFBOWidth,
+               (GLsizei)mShadowFBOHeight);
+
+    glEnable(GL_DEPTH_TEST);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    
+    //---------------------------------------------------------
+    // ライト視点行列を構築
+    //   - カメラの前方方向の少し先を中心にライトカメラを置く
+    //   - Ortho + LookAt の組み合わせ
+    //---------------------------------------------------------
+    Vector3 camCenter = mInvView.GetTranslation() + mInvView.GetZAxis() * 30.0f;
+    Vector3 lightDir  = mLightingManager->GetLightDirection();
+    Vector3 lightPos  = camCenter - lightDir * 50.0f;
+    
+    Matrix4 lightView = Matrix4::CreateLookAt(
+        lightPos,
+        camCenter,
+        Vector3::UnitY
+    );
+
+    Matrix4 lightProj = Matrix4::CreateOrtho(
+        mShadowOrthoWidth,
+        mShadowOrthoHeight,
+        mShadowNear,
+        mShadowFar
+    );
+    
+    // OpenGL では通常 Projection * View を使うが、
+    // ここでは view * proj の形で扱っている（フラスタム生成と対応）
+    Matrix4 lightVP = lightView * lightProj;
+    mLightSpaceMatrix = lightVP;
+    
+    // ライト側フラスタム（影用）を作成
+    Frustum shadowFrustum = BuildFrustumFromMatrix(lightVP);
+    
+    //---------------------------------------------------------
+    // 影描画ループ
+    //---------------------------------------------------------
+    for (auto& visual : mVisualComps)
+    {
+        if (!visual->GetEnableShadow() || !visual->IsVisible())
+            continue;
+        
+        // ライト側フラスタムカリング
+        Actor* owner = visual->GetOwner();
+        if (owner)
+        {
+            auto bv = owner->GetComponent<BoundingVolumeComponent>();
+            if (bv)
+            {
+                Cube aabb = bv->GetWorldAABB();
+                // 必要なら aabb.Expand(…) 等で少し余裕を持たせる
+                
+                if (!FrustumIntersectsAABB(shadowFrustum, aabb))
+                    continue;
+            }
+        }
+        
+        // 影用描画（VisualComponent 側でシャドウシェーダーを使う）
+        visual->DrawShadow();
+    }
+    
+    //---------------------------------------------------------
+    // 元のフレームバッファとビューポートに戻す
+    //---------------------------------------------------------
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0,
+               (GLsizei)mScreenWidth,
+               (GLsizei)mScreenHeight);
+}
+
+
+//=============================================================
+// その他ユーティリティ
+//=============================================================
 
 void Renderer::RegisterSkyDome(SkyDomeComponent* sky)
 {
     mSkyDomeComp = sky;
     if (mSkyDomeComp)
     {
+        // SkyDome にライティング情報を共有
         mSkyDomeComp->SetLightingManager(mLightingManager);
     }
 }
 
+// クリアカラー変更
 void Renderer::SetClearColor(const Vector3& color)
 {
     mClearColor = color;
@@ -327,14 +608,18 @@ void Renderer::SetClearColor(const Vector3& color)
 }
 
 
-// シェーダー 読み込み
+//=============================================================
+// シェーダーロード
+//=============================================================
+
 bool Renderer::LoadShaders()
 {
     std::string vShaderName;
     std::string fShaderName;
-
     
-    // 天気シェーダー
+    //---------------------------------------------------------
+    // 天気オーバーレイ用シェーダー
+    //---------------------------------------------------------
     vShaderName = mShaderPath + "WeatherScreen.vert";
     fShaderName = mShaderPath + "WeatherScreen.frag";
     mShaders["WeatherOverlay"] = std::make_shared<Shader>();
@@ -342,7 +627,10 @@ bool Renderer::LoadShaders()
     {
         return false;
     }
-    // メッシュ用シェーダー
+
+    //---------------------------------------------------------
+    // メッシュ用 Phong シェーダー
+    //---------------------------------------------------------
     vShaderName = mShaderPath + "Phong.vert";
     fShaderName = mShaderPath + "Phong.frag";
     mShaders["Mesh"] = std::make_shared<Shader>();
@@ -350,7 +638,10 @@ bool Renderer::LoadShaders()
     {
         return false;
     }
-    // スキンメッシュ用シェーダー
+
+    //---------------------------------------------------------
+    // スキンメッシュ用（頂点のみ差し替え）
+    //---------------------------------------------------------
     vShaderName = mShaderPath + "Skinned.vert";
     fShaderName = mShaderPath + "Phong.frag";
     mShaders["Skinned"] = std::make_shared<Shader>();
@@ -358,17 +649,25 @@ bool Renderer::LoadShaders()
     {
         return false;
     }
-    // スプライト用シェーダー
-    vShaderName = mShaderPath +"Sprite.vert";
+
+    //---------------------------------------------------------
+    // スプライト用
+    //---------------------------------------------------------
+    vShaderName = mShaderPath + "Sprite.vert";
     fShaderName = mShaderPath + "Sprite.frag";
     mShaders["Sprite"] = std::make_shared<Shader>();
     if (!mShaders["Sprite"]->Load(vShaderName.c_str(), fShaderName.c_str()))
     {
         return false;
     }
+
+    // 2D用の固定 ViewProj をセット
     Matrix4 viewProj = Matrix4::CreateSimpleViewProj(mScreenWidth, mScreenHeight);
     mShaders["Sprite"]->SetMatrixUniform("uViewProj", viewProj);
-    // ビルボード用シェーダー
+
+    //---------------------------------------------------------
+    // ビルボード
+    //---------------------------------------------------------
     vShaderName = mShaderPath + "Billboard.vert";
     fShaderName = mShaderPath + "Billboard.frag";
     mShaders["Billboard"] = std::make_shared<Shader>();
@@ -376,7 +675,10 @@ bool Renderer::LoadShaders()
     {
         return false;
     }
+
+    //---------------------------------------------------------
     // パーティクル
+    //---------------------------------------------------------
     vShaderName = mShaderPath + "Billboard.vert";
     fShaderName = mShaderPath + "Particle.frag";
     mShaders["Particle"] = std::make_shared<Shader>();
@@ -384,7 +686,10 @@ bool Renderer::LoadShaders()
     {
         return false;
     }
-    // ソリッドカラー
+
+    //---------------------------------------------------------
+    // ソリッドカラー（ワイヤーフレーム／デバッグ用など）
+    //---------------------------------------------------------
     vShaderName = mShaderPath + "BasicMesh.vert";
     fShaderName = mShaderPath + "SolidColor.frag";
     mShaders["Solid"] = std::make_shared<Shader>();
@@ -392,7 +697,10 @@ bool Renderer::LoadShaders()
     {
         return false;
     }
-    // シャドウマップ用（Skinned）
+
+    //---------------------------------------------------------
+    // シャドウマップ（スキンメッシュ）
+    //---------------------------------------------------------
     vShaderName = mShaderPath + "ShadowMapping_Skinned.vert";
     fShaderName = mShaderPath + "ShadowMapping.frag";
     mShaders["ShadowSkinned"] = std::make_shared<Shader>();
@@ -400,7 +708,10 @@ bool Renderer::LoadShaders()
     {
         return false;
     }
-    // シャドウマップ用（Mesh）
+
+    //---------------------------------------------------------
+    // シャドウマップ（通常メッシュ）
+    //---------------------------------------------------------
     vShaderName = mShaderPath + "ShadowMapping_Mesh.vert";
     fShaderName = mShaderPath + "ShadowMapping.frag";
     mShaders["ShadowMesh"] = std::make_shared<Shader>();
@@ -408,7 +719,10 @@ bool Renderer::LoadShaders()
     {
         return false;
     }
-    // スカイドーム
+
+    //---------------------------------------------------------
+    // スカイドーム（時間帯・天候ベースの空）
+    //---------------------------------------------------------
     vShaderName = mShaderPath + "WeatherDome.vert";
     fShaderName = mShaderPath + "WeatherDome.frag";
     mShaders["SkyDome"] = std::make_shared<Shader>();
@@ -416,14 +730,35 @@ bool Renderer::LoadShaders()
     {
         return false;
     }
-    // ビューマトリックス、プロジェクションマトリックス（デフォルト値）
-    mViewMatrix = Matrix4::CreateLookAt(Vector3(0, 0.5f, -3), Vector3(0, 0, 10), Vector3::UnitY);
-    mProjectionMatrix = Matrix4::CreatePerspectiveFOV(Math::ToRadians(mPerspectiveFOV), mScreenWidth, mScreenHeight, 1.0f, 2000.0f);
 
+    //---------------------------------------------------------
+    // デフォルトのビュー／プロジェクション行列
+    //---------------------------------------------------------
+    mViewMatrix = Matrix4::CreateLookAt(
+        Vector3(0, 0.5f, -3),
+        Vector3(0, 0, 10),
+        Vector3::UnitY
+    );
+    mProjectionMatrix = Matrix4::CreatePerspectiveFOV(
+        Math::ToRadians(mPerspectiveFOV),
+        mScreenWidth,
+        mScreenHeight,
+        1.0f,
+        2000.0f
+    );
+    
     return true;
 }
 
-std::shared_ptr<Texture> Renderer::CreateTextTexture(const std::string& text, const Vector3& color, std::shared_ptr<TextFont> font)
+
+//=============================================================
+// テキスト → テクスチャ生成（SDL3_ttf）
+//=============================================================
+
+std::shared_ptr<Texture> Renderer::CreateTextTexture(
+    const std::string& text,
+    const Vector3& color,
+    std::shared_ptr<TextFont> font)
 {
     if (!font || !font->IsValid())
     {
@@ -444,47 +779,49 @@ std::shared_ptr<Texture> Renderer::CreateTextTexture(const std::string& text, co
     sdlColor.b = static_cast<Uint8>(std::clamp(color.z, 0.0f, 1.0f) * 255.0f);
     sdlColor.a = 255;
 
-    // UTF-8 の日本語も扱える版
-    SDL_Surface* surface = TTF_RenderUTF8_Blended(
+    // SDL3_ttf: TTF_RenderText_Blended( font, text, length, color )
+    SDL_Surface* surface = TTF_RenderText_Blended(
         nativeFont,
         text.c_str(),
+        text.size(),   // 長さを渡す（0 ではない）
         sdlColor
     );
+
     if (!surface)
     {
-        std::cerr << "[Renderer] TTF_RenderUTF8_Blended failed: "
-                  << TTF_GetError() << std::endl;
-        return nullptr;
-    }
-
-    // OpenGLに食わせやすい RGBA形式に揃える
-    SDL_Surface* conv = SDL_ConvertSurfaceFormat(
-        surface,
-        SDL_PIXELFORMAT_ABGR8888,   // GL_RGBAに対応しやすい
-        0
-    );
-    SDL_FreeSurface(surface);
-
-    if (!conv)
-    {
-        std::cerr << "[Renderer] SDL_ConvertSurfaceFormat failed: "
+        std::cerr << "[Renderer] TTF_RenderText_Blended failed: "
                   << SDL_GetError() << std::endl;
         return nullptr;
     }
 
-    const int width  = conv->w;
-    const int height = conv->h;
+    // OpenGL に渡しやすい RGBA8888 に変換
+    SDL_Surface* conv = SDL_ConvertSurface(
+        surface,
+        SDL_PIXELFORMAT_RGBA32   // SDL3 推奨の 32bit RGBA
+    );
+    SDL_DestroySurface(surface);
+
+    if (!conv)
+    {
+        std::cerr << "[Renderer] SDL_ConvertSurface failed: "
+                  << SDL_GetError() << std::endl;
+        return nullptr;
+    }
+
+    const int   width  = conv->w;
+    const int   height = conv->h;
     const void* pixels = conv->pixels;
 
-    // Texture を生成
     auto tex = std::make_shared<Texture>();
     if (!tex->CreateFromPixels(pixels, width, height, /*hasAlpha=*/true))
     {
-        SDL_FreeSurface(conv);
+        SDL_DestroySurface(conv);
         std::cerr << "[Renderer] CreateFromPixels failed" << std::endl;
         return nullptr;
     }
 
-    SDL_FreeSurface(conv);
+    SDL_DestroySurface(conv);
     return tex;
 }
+
+} // namespace toy

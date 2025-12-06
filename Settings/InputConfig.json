@@ -1,0 +1,36 @@
+{
+  "buttons": {
+    "A": {
+      "keyboard": ["Z"],
+      "gamepad": ["A"]
+    },
+    "B": {
+      "keyboard": ["X"],
+      "gamepad": ["B"]
+    },
+    "X": {
+      "keyboard": ["C"],
+      "gamepad": ["X"]
+    },
+    "Y": {
+      "keyboard": ["V"],
+      "gamepad": ["Y"]
+    },
+
+    "L1": { "gamepad": ["LeftShoulder"] },
+    "R1": { "gamepad": ["RightShoulder"] },
+
+    "Start":  { "keyboard": ["Enter"],  "gamepad": ["Start"] },
+    "Select": { "keyboard": ["Escape"], "gamepad": ["Back"] },
+
+    "DPadUp":    { "keyboard": ["Up"],    "gamepad": ["DPadUp"] },
+    "DPadDown":  { "keyboard": ["Down"],  "gamepad": ["DPadDown"] },
+    "DPadLeft":  { "keyboard": ["Left"],  "gamepad": ["DPadLeft"] },
+    "DPadRight": { "keyboard": ["Right"], "gamepad": ["DPadRight"] },
+
+    "KeyW": { "keyboard": ["W"] },
+    "KeyA": { "keyboard": ["A"] },
+    "KeyS": { "keyboard": ["S"] },
+    "KeyD": { "keyboard": ["D"] }
+  }
+}
