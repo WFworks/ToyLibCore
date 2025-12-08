@@ -1,13 +1,13 @@
 #pragma once
 
 #include "Utils/MathUtil.h"
+#include "glad/glad.h"
 
 #include <string>
 #include <vector>
 #include <memory>
 #include <unordered_map>
 #include <SDL3/SDL.h>
-#include <GL/glew.h>
 
 namespace toy {
 
@@ -25,6 +25,24 @@ enum class VisualLayer
     UI,             // UI / HUD
 };
 
+//-------------------------------------------------------------
+// UI スケール情報
+// ・物理解像度 / 論理解像度 / スケール係数をまとめて保持
+//-------------------------------------------------------------
+struct UIScaleInfo
+{
+    float screenW  = 0.0f;  // 物理スクリーン幅（ピクセル）
+    float screenH  = 0.0f;  // 物理スクリーン高さ（ピクセル）
+
+    float virtualW = 0.0f;  // 論理解像度の幅（UI座標系）
+    float virtualH = 0.0f;  // 論理解像度の高さ（UI座標系）
+
+    float scaleX   = 1.0f;  // screenW / virtualW
+    float scaleY   = 1.0f;  // screenH / virtualH
+    float scale    = 1.0f;  // min(scaleX, scaleY)  レターボックス用の共通スケール
+    float offsetX  = 0.0f;  // レターボックスの左右余白
+    float offsetY  = 0.0f;  // レターボックスの上下余白
+};
 
 //-------------------------------------------------------------
 // Renderer
@@ -42,8 +60,8 @@ public:
     // 初期化／終了
     //---------------------------------------------------------
     
-    // SDL + OpenGL コンテキストの初期化
-    bool Initialize();
+    // OpenGL コンテキストの初期化
+    bool Initialize(SDL_Window* window);
     
     // SDL_Window 取得
     SDL_Window* GetSDLWindow() const { return mWindow; }
@@ -56,6 +74,11 @@ public:
     
     // クリアカラー設定
     void SetClearColor(const Vector3& color);
+    const Vector3& GetClearColor() const { return mClearColor; }
+    
+    // ワイヤーフレームカラー
+    void SetWireColor(const Vector3& color) { mWireColor = color; }
+    const Vector3& GetWireColor() const { return mWireColor; }
     
     
     //---------------------------------------------------------
@@ -84,9 +107,20 @@ public:
     float GetScreenWidth() const { return mScreenWidth; }
     float GetScreenHeight() const { return mScreenHeight; }
     
+    float GetVirtualWidth() const { return mVirtualWidth; }
+    float GetVirtualHeight() const { return mVirtualHeight; }
+
+    // 論理解像度の設定（UI 座標系用）
+    void SetVirtualResolution(float w, float h);
+
+    // UI 用のスケール情報をまとめて取得
+    UIScaleInfo GetUIScaleInfo() const;
+    
     // DPI スケール（Retina 等でのスケーリング用）
     float GetWindowDisplayScale() const { return mWindowDisplayScale; }
     
+    // ウィンドウの実ピクセルサイズの変更を受け取る
+    void OnWindowResized(int pixelW, int pixelH);
     
     //---------------------------------------------------------
     // VisualComponent 管理
@@ -168,16 +202,15 @@ private:
     // ライティング管理
     std::shared_ptr<class LightingManager> mLightingManager;
     
-    // シェーダーの配置パス
+    // シェーダーの配置パスf
     std::string mShaderPath;
     
-    // ウィンドウタイトル
-    std::string mStrTitle;
-    
-    // スクリーンサイズ
+   
+    // スクリーンサイズ (物理・仮想)
     float mScreenWidth;
     float mScreenHeight;
-    bool  mIsFullScreen;
+    float mVirtualWidth;
+    float mVirtualHeight;
     
     // 視野角（Perspective FOV／度）
     float mPerspectiveFOV;
@@ -187,6 +220,9 @@ private:
     
     // クリアカラー
     Vector3 mClearColor;
+    
+    // ワイヤフレームのカラー
+    Vector3 mWireColor;
     
     
     //---------------------------------------------------------

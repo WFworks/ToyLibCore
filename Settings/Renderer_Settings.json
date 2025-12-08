@@ -1,10 +1,8 @@
 {
-  "title": "ToyLib Game",
   "shader_path": "ToyLib/Shaders/",
   "screen": {
-    "width": 1280.0,
-    "height": 768.0,
-    "fullscreen": false
+    "virtual_with": 1280.0,
+    "virtual_height": 768.0
   },
   "perspectiveFOV": 60.0,
   "camera": {
@@ -14,6 +12,7 @@
     "enabled": true
   },
   "clearColor": [0.2, 0.5, 0.8],
+  "wireColor": [1.0, 1.0, 1.0],
   "ambient": [0.5, 0.5, 0.5],
   "specular": [0.5, 0.5, 0.5],
   "directionalLight": {
